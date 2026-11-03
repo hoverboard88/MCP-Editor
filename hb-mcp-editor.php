@@ -23,11 +23,5 @@ $hb_mcp_editor_update_checker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::b
 );
 $hb_mcp_editor_update_checker->setBranch( 'main' );
 
-// The repository is private, so update checks need a GitHub token with read
-// access to its contents. Define it in wp-config.php, never in this file.
-if ( defined( 'HB_MCP_EDITOR_GITHUB_TOKEN' ) ) {
-	$hb_mcp_editor_update_checker->setAuthentication( HB_MCP_EDITOR_GITHUB_TOKEN );
-}
-
 require __DIR__ . '/includes/roles.php';
 require __DIR__ . '/includes/abilities.php';
