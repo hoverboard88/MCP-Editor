@@ -352,8 +352,9 @@ function hb_ai_list_content( array $input ) {
  * Scalar types only. The structured types — repeater, flexible_content, group,
  * link, google_map — take shaped arrays that are easy to corrupt from a flat
  * value, and the relational ones (post_object, relationship, taxonomy, user,
- * image, file, gallery) take IDs that a client cannot verify and the role
- * cannot create, since upload_files is withheld. password is never writable.
+ * image, file, gallery) take IDs that a client cannot easily verify. Images
+ * reach a post through hb/set-featured-image instead. password is never
+ * writable.
  *
  * @return array List of ACF field type slugs.
  */
@@ -641,6 +642,10 @@ function hb_ai_get_content( array $input ) {
 		)
 	);
 
+	if ( post_type_supports( $post->post_type, 'thumbnail' ) ) {
+		$out['featured_image'] = hb_ai_image_summary( get_post_thumbnail_id( $post->ID ) );
+	}
+
 	if ( class_exists( 'WPSEO_Meta' ) ) {
 		$out['seo'] = hb_ai_get_seo_values( $post->ID );
 	}
@@ -857,7 +862,7 @@ function hb_register_ai_abilities() {
 		'hb/get-content',
 		array(
 			'label'               => __( 'Get content', 'hb' ),
-			'description'         => __( 'Read the title, body, excerpt and Yoast SEO fields of a post, page or custom post type entry, including drafts. Use list-content to find the ID.', 'hb' ),
+			'description'         => __( 'Read the title, body, excerpt, featured image and Yoast SEO fields of a post, page or custom post type entry, including drafts. Use list-content to find the ID.', 'hb' ),
 			'category'            => 'hb-content',
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -874,10 +879,11 @@ function hb_register_ai_abilities() {
 				'properties' => array_merge(
 					hb_ai_post_summary_schema()['properties'],
 					array(
-						'content'  => array( 'type' => 'string' ),
-						'excerpt'  => array( 'type' => 'string' ),
-						'modified' => array( 'type' => 'string' ),
-						'seo'      => array(
+						'content'        => array( 'type' => 'string' ),
+						'excerpt'        => array( 'type' => 'string' ),
+						'modified'       => array( 'type' => 'string' ),
+						'featured_image' => hb_ai_image_summary_schema(),
+						'seo'            => array(
 							'type'       => 'object',
 							'properties' => $seo_properties,
 						),
