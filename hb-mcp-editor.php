@@ -4,7 +4,7 @@
  * Description: AI Drafter role and content abilities (create, edit, images, ACF and Yoast fields) for MCP clients connected through the MCP Adapter plugin.
  * Author: Hoverboard
  * Author URI: https://hoverboardstudios.com
- * Version: 1.0.0
+ * Version: 1.1.0
  * Requires at least: 7.1
  *
  * @package Hoverboard

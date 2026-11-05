@@ -15,7 +15,7 @@
  * no-op once a role exists, so without a version gate an edited capability
  * list would never reach sites where the role is already registered.
  */
-define( 'HB_AI_DRAFTER_ROLE_VERSION', '5' );
+define( 'HB_AI_DRAFTER_ROLE_VERSION', '6' );
 
 /**
  * Capability that gates access to the MCP endpoint.
@@ -29,15 +29,15 @@ define( 'HB_AI_MCP_CAPABILITY', 'hb_use_mcp' );
 /**
  * Capabilities granted to the AI drafter role.
  *
- * Scoped to content: the account can create and revise posts, pages and the
- * custom post types, including published ones, relying on WordPress revisions
- * as the rollback path.
+ * Scoped to content: the account can create, revise, publish and schedule
+ * posts, pages and the custom post types, relying on WordPress revisions as
+ * the rollback path.
  *
  * Two things are still deliberately withheld:
  *
- * - publish_* and delete_published_*, so the account cannot take new content
- *   live, unpublish what is live, or delete it. Edits to a live page apply
- *   immediately, but its published state is not the account's to change.
+ * - delete_published_*, so the account cannot delete what is live. The MCP
+ *   abilities also offer no way to unpublish; taking content down stays a
+ *   human decision.
  * - Everything outside content and images. No manage_categories,
  *   edit_theme_options or manage_options, so taxonomy structure, templates and
  *   settings stay out of reach.
@@ -58,12 +58,14 @@ function hb_ai_drafter_capabilities() {
 		'edit_private_posts'   => true,
 		'read_private_posts'   => true,
 		'delete_posts'         => true,
+		'publish_posts'        => true,
 		'edit_pages'           => true,
 		'edit_others_pages'    => true,
 		'edit_published_pages' => true,
 		'edit_private_pages'   => true,
 		'read_private_pages'   => true,
 		'delete_pages'         => true,
+		'publish_pages'        => true,
 		'upload_files'         => true,
 		HB_AI_MCP_CAPABILITY   => true,
 	);
