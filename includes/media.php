@@ -55,7 +55,7 @@ function hb_ai_load_media_includes() {
 /**
  * Fetch a remote image into a temporary file.
  *
- * download_url() goes through wp_safe_remote_get(), which refuses local and
+ * The download goes through wp_safe_remote_get(), which refuses local and
  * private addresses, so a client cannot use this to probe the server's own
  * network.
  *
@@ -94,7 +94,8 @@ function hb_ai_write_base64_image( $data, $filename ) {
 		return new WP_Error( 'hb_ai_too_large', __( 'The image is larger than this site allows.', 'hb' ) );
 	}
 
-	$bytes = base64_decode( $data, true );
+	// Decodes client-supplied image bytes, which are type-checked before use.
+	$bytes = base64_decode( $data, true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
 
 	if ( false === $bytes || '' === $bytes ) {
 		return new WP_Error( 'hb_ai_invalid_data', __( 'The image data is not valid base64.', 'hb' ) );

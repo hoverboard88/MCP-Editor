@@ -29,7 +29,7 @@
  * @param string $capability Capability the adapter will check.
  * @return string Capability to require instead.
  */
-function hb_ai_mcp_transport_capability( $capability ) {
+function hb_ai_mcp_transport_capability() {
 	return HB_AI_MCP_CAPABILITY;
 }
 add_filter( 'mcp_adapter_default_transport_permission_user_capability', 'hb_ai_mcp_transport_capability' );

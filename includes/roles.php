@@ -51,21 +51,21 @@ define( 'HB_AI_MCP_CAPABILITY', 'hb_use_mcp' );
  */
 function hb_ai_drafter_capabilities() {
 	return array(
-		'read'                  => true,
-		'edit_posts'            => true,
-		'edit_others_posts'     => true,
-		'edit_published_posts'  => true,
-		'edit_private_posts'    => true,
-		'read_private_posts'    => true,
-		'delete_posts'          => true,
-		'edit_pages'            => true,
-		'edit_others_pages'     => true,
-		'edit_published_pages'  => true,
-		'edit_private_pages'    => true,
-		'read_private_pages'    => true,
-		'delete_pages'          => true,
-		'upload_files'          => true,
-		HB_AI_MCP_CAPABILITY    => true,
+		'read'                 => true,
+		'edit_posts'           => true,
+		'edit_others_posts'    => true,
+		'edit_published_posts' => true,
+		'edit_private_posts'   => true,
+		'read_private_posts'   => true,
+		'delete_posts'         => true,
+		'edit_pages'           => true,
+		'edit_others_pages'    => true,
+		'edit_published_pages' => true,
+		'edit_private_pages'   => true,
+		'read_private_pages'   => true,
+		'delete_pages'         => true,
+		'upload_files'         => true,
+		HB_AI_MCP_CAPABILITY   => true,
 	);
 }
 

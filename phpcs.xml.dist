@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<ruleset name="MCP Editor">
+	<description>WordPress Coding Standards for MCP Editor.</description>
+
+	<file>.</file>
+
+	<exclude-pattern>/vendor/*</exclude-pattern>
+	<exclude-pattern>/plugin-update-checker/*</exclude-pattern>
+
+	<arg name="extensions" value="php"/>
+	<arg name="colors"/>
+	<arg value="sp"/>
+	<arg name="parallel" value="8"/>
+
+	<rule ref="WordPress"/>
+
+	<!-- Text domain used by every translatable string. -->
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="hb"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!--
+	Globals are namespaced under hb_. WPCS rejects a two-letter prefix as too
+	short, so the longer stems actually in use are listed instead.
+	-->
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="hb_ai"/>
+				<element value="hb_register_ai"/>
+				<element value="hb_mcp_editor"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="WordPress.WP.DeprecatedFunctions">
+		<properties>
+			<property name="minimum_wp_version" value="7.1"/>
+		</properties>
+	</rule>
+
+	<rule ref="PHPCompatibilityWP"/>
+	<config name="testVersion" value="7.4-"/>
+</ruleset>
