@@ -11,6 +11,8 @@ then moves everything under the new version.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-05
+
 ### Added
 
 - `hb/upload-image` ability: add an image to the media library from a URL or
@@ -20,6 +22,9 @@ then moves everything under the new version.
 - `hb/get-content` now returns the post's featured image (#1).
 - WordPress Coding Standards with a PHPCS check on pull requests (#1).
 - Release script (`bin/release.sh`) and this changelog.
+- Allow publishing and scheduling content over MCP (#2)
+- Adding claude.md (#2)
+- Adding release script (#3)
 
 ### Changed
 
