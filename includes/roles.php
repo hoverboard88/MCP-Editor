@@ -15,7 +15,7 @@
  * no-op once a role exists, so without a version gate an edited capability
  * list would never reach sites where the role is already registered.
  */
-define( 'HB_AI_DRAFTER_ROLE_VERSION', '4' );
+define( 'HB_AI_DRAFTER_ROLE_VERSION', '5' );
 
 /**
  * Capability that gates access to the MCP endpoint.
@@ -38,28 +38,34 @@ define( 'HB_AI_MCP_CAPABILITY', 'hb_use_mcp' );
  * - publish_* and delete_published_*, so the account cannot take new content
  *   live, unpublish what is live, or delete it. Edits to a live page apply
  *   immediately, but its published state is not the account's to change.
- * - Everything outside content. No upload_files, manage_categories,
- *   edit_theme_options or manage_options, so media, taxonomy structure,
- *   templates and settings stay out of reach.
+ * - Everything outside content and images. No manage_categories,
+ *   edit_theme_options or manage_options, so taxonomy structure, templates and
+ *   settings stay out of reach.
+ *
+ * upload_files is granted so the account can add images and set featured
+ * images. The MCP abilities only accept image types (see media.php); the
+ * capability itself is broader, but the account has no route other than MCP
+ * in practice.
  *
  * @return array Map of capability name to whether it is granted.
  */
 function hb_ai_drafter_capabilities() {
 	return array(
-		'read'                  => true,
-		'edit_posts'            => true,
-		'edit_others_posts'     => true,
-		'edit_published_posts'  => true,
-		'edit_private_posts'    => true,
-		'read_private_posts'    => true,
-		'delete_posts'          => true,
-		'edit_pages'            => true,
-		'edit_others_pages'     => true,
-		'edit_published_pages'  => true,
-		'edit_private_pages'    => true,
-		'read_private_pages'    => true,
-		'delete_pages'          => true,
-		HB_AI_MCP_CAPABILITY    => true,
+		'read'                 => true,
+		'edit_posts'           => true,
+		'edit_others_posts'    => true,
+		'edit_published_posts' => true,
+		'edit_private_posts'   => true,
+		'read_private_posts'   => true,
+		'delete_posts'         => true,
+		'edit_pages'           => true,
+		'edit_others_pages'    => true,
+		'edit_published_pages' => true,
+		'edit_private_pages'   => true,
+		'read_private_pages'   => true,
+		'delete_pages'         => true,
+		'upload_files'         => true,
+		HB_AI_MCP_CAPABILITY   => true,
 	);
 }
 
