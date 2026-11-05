@@ -9,8 +9,8 @@
  * Capabilities are the real boundary — see the AI Drafter role in roles.php.
  * These callbacks add a second, independent guard: the set of post types that
  * can be reached is an explicit allow-list rather than everything the caller
- * happens to hold a capability for, and post_status is never taken from
- * client input on create.
+ * happens to hold a capability for, and post_status is only ever set to the
+ * handful of values the abilities name, never passed through from a client.
  *
  * @package Hoverboard
  */
@@ -191,17 +191,120 @@ function hb_ai_ability_meta() {
 }
 
 /**
+ * Whether the current user may publish the given post type.
+ *
+ * @param string $post_type Post type slug.
+ * @return bool Whether the current user may publish this post type.
+ */
+function hb_ai_can_publish( $post_type ) {
+	$post_type_object = get_post_type_object( $post_type );
+
+	return null !== $post_type_object && current_user_can( $post_type_object->cap->publish_posts );
+}
+
+/**
+ * Parse a client-supplied publish date.
+ *
+ * Accepts ISO 8601. A date with an offset or Z is converted; one without is
+ * taken to be in the site's timezone, as the editor does.
+ *
+ * @param string $date Date string.
+ * @return array|WP_Error Array of local and GMT MySQL dates, or an error.
+ */
+function hb_ai_parse_date( $date ) {
+	$dates = rest_get_date_with_gmt( (string) $date );
+
+	if ( null === $dates ) {
+		return new WP_Error(
+			'hb_ai_invalid_date',
+			__( 'The date must be ISO 8601, for example 2026-12-01T09:00:00.', 'hb' )
+		);
+	}
+
+	return $dates;
+}
+
+/**
+ * Post fields that publish content now or at a given date.
+ *
+ * Status is always 'publish'. WordPress turns that into 'future' itself when
+ * the date is ahead of now, which is how scheduling works in the editor too.
+ * edit_date stops wp_update_post() discarding the date of a draft that never
+ * had one.
+ *
+ * @param string $date Optional ISO 8601 date. Empty publishes now.
+ * @return array|WP_Error Post fields, or an error.
+ */
+function hb_ai_publish_fields( $date ) {
+	if ( '' === $date ) {
+		$dates = array( current_time( 'mysql' ), current_time( 'mysql', true ) );
+	} else {
+		$dates = hb_ai_parse_date( $date );
+
+		if ( is_wp_error( $dates ) ) {
+			return $dates;
+		}
+	}
+
+	return array(
+		'post_status'   => 'publish',
+		'post_date'     => $dates[0],
+		'post_date_gmt' => $dates[1],
+		'edit_date'     => true,
+	);
+}
+
+/**
+ * Add the publish date to a post summary.
+ *
+ * @param int $post_id Post ID.
+ * @return array Summary including the date, in site time and GMT.
+ */
+function hb_ai_post_summary_with_date( $post_id ) {
+	$post = get_post( $post_id );
+
+	return array_merge(
+		hb_ai_post_summary( $post_id ),
+		array(
+			'date'     => mysql_to_rfc3339( $post->post_date ),
+			'date_gmt' => '0000-00-00 00:00:00' === $post->post_date_gmt ? null : mysql_to_rfc3339( $post->post_date_gmt ) . 'Z',
+		)
+	);
+}
+
+/**
+ * Schema for a post summary including its date.
+ *
+ * @return array JSON Schema definition.
+ */
+function hb_ai_post_summary_with_date_schema() {
+	$schema = hb_ai_post_summary_schema();
+
+	$schema['properties']['date']     = array(
+		'type'        => 'string',
+		'description' => __( 'Publish date in the site\'s timezone.', 'hb' ),
+	);
+	$schema['properties']['date_gmt'] = array(
+		'type'        => array( 'string', 'null' ),
+		'description' => __( 'Publish date in UTC, or null for an undated draft.', 'hb' ),
+	);
+
+	return $schema;
+}
+
+/**
  * Create a new piece of content.
  *
- * New content is always created unpublished. Taking it live is a separate,
- * human step — the role carries no publish_* capability, so a status passed
- * by a client would be refused by WordPress anyway.
+ * Created as a draft unless status asks for 'publish', in which case it goes
+ * live now, or is scheduled when date is in the future.
  *
  * @param array $input Ability input.
  * @return array|WP_Error Summary of the new post, or an error.
  */
 function hb_ai_create_content( array $input ) {
 	$post_type = isset( $input['post_type'] ) ? (string) $input['post_type'] : 'post';
+	$status    = isset( $input['status'] ) ? (string) $input['status'] : 'draft';
+	$date      = isset( $input['date'] ) ? trim( (string) $input['date'] ) : '';
 
 	if ( ! in_array( $post_type, hb_ai_allowed_post_types(), true ) ) {
 		return new WP_Error(
@@ -214,22 +317,82 @@ function hb_ai_create_content( array $input ) {
 		);
 	}
 
-	$post_id = wp_insert_post(
-		array(
-			'post_type'    => $post_type,
-			'post_status'  => 'draft',
-			'post_title'   => wp_slash( (string) $input['title'] ),
-			'post_content' => wp_slash( isset( $input['content'] ) ? (string) $input['content'] : '' ),
-			'post_excerpt' => wp_slash( isset( $input['excerpt'] ) ? (string) $input['excerpt'] : '' ),
-		),
-		true
+	if ( ! in_array( $status, array( 'draft', 'publish' ), true ) ) {
+		return new WP_Error( 'hb_ai_bad_status', __( 'status must be draft or publish.', 'hb' ) );
+	}
+
+	$postarr = array(
+		'post_type'    => $post_type,
+		'post_status'  => 'draft',
+		'post_title'   => wp_slash( (string) $input['title'] ),
+		'post_content' => wp_slash( isset( $input['content'] ) ? (string) $input['content'] : '' ),
+		'post_excerpt' => wp_slash( isset( $input['excerpt'] ) ? (string) $input['excerpt'] : '' ),
 	);
+
+	if ( 'publish' === $status ) {
+		$fields = hb_ai_publish_fields( $date );
+
+		if ( is_wp_error( $fields ) ) {
+			return $fields;
+		}
+
+		$postarr = array_merge( $postarr, $fields );
+	} elseif ( '' !== $date ) {
+		return new WP_Error( 'hb_ai_date_needs_publish', __( 'date only applies with status publish. Drafts are not dated.', 'hb' ) );
+	}
+
+	$post_id = wp_insert_post( $postarr, true );
 
 	if ( is_wp_error( $post_id ) ) {
 		return $post_id;
 	}
 
-	return hb_ai_post_summary( $post_id );
+	return hb_ai_post_summary_with_date( $post_id );
+}
+
+/**
+ * Publish or schedule existing content.
+ *
+ * Takes a draft, pending or scheduled post live now, or schedules it for a
+ * future date. A scheduled post can be rescheduled. Content that is already
+ * published is refused: changing a live post's date reorders the site and is
+ * not what this is for.
+ *
+ * @param array $input Ability input.
+ * @return array|WP_Error Summary of the post, or an error.
+ */
+function hb_ai_publish_content( array $input ) {
+	$post_id = isset( $input['post_id'] ) ? absint( $input['post_id'] ) : 0;
+	$post    = hb_ai_check_field_target( $post_id );
+
+	if ( is_wp_error( $post ) ) {
+		return $post;
+	}
+
+	if ( ! in_array( $post->post_status, array( 'auto-draft', 'draft', 'pending', 'future' ), true ) ) {
+		return new WP_Error(
+			'hb_ai_bad_status',
+			sprintf(
+				/* translators: %s: post status slug. */
+				__( 'Only drafts, pending and scheduled content can be published here; this is "%s".', 'hb' ),
+				$post->post_status
+			)
+		);
+	}
+
+	$fields = hb_ai_publish_fields( isset( $input['date'] ) ? trim( (string) $input['date'] ) : '' );
+
+	if ( is_wp_error( $fields ) ) {
+		return $fields;
+	}
+
+	$result = wp_update_post( array_merge( array( 'ID' => $post->ID ), $fields ), true );
+
+	if ( is_wp_error( $result ) ) {
+		return $result;
+	}
+
+	return hb_ai_post_summary_with_date( $post->ID );
 }
 
 /**
@@ -724,11 +887,20 @@ add_action( 'wp_abilities_api_categories_init', 'hb_register_ai_ability_category
 function hb_register_ai_abilities() {
 	$allowed = hb_ai_allowed_post_types();
 
+	$date_property = array(
+		'type'        => 'string',
+		'description' => sprintf(
+			/* translators: %s: timezone name. */
+			__( 'Publish date, ISO 8601 (e.g. 2026-12-01T09:00:00). A future date schedules the post. Without an offset, the site timezone (%s) is assumed. Omit to publish now.', 'hb' ),
+			wp_timezone_string()
+		),
+	);
+
 	wp_register_ability(
 		'hb/create-content',
 		array(
 			'label'               => __( 'Create content', 'hb' ),
-			'description'         => __( 'Create a new post, page or custom post type entry. New content is always created as a draft; a human must publish it.', 'hb' ),
+			'description'         => __( 'Create a new post, page or custom post type entry. Created as a draft unless status is publish; with status publish it goes live now, or is scheduled if date is in the future.', 'hb' ),
 			'category'            => 'hb-content',
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -751,13 +923,26 @@ function hb_register_ai_abilities() {
 						'type'        => 'string',
 						'description' => __( 'Optional excerpt.', 'hb' ),
 					),
+					'status'    => array(
+						'type'        => 'string',
+						'enum'        => array( 'draft', 'publish' ),
+						'default'     => 'draft',
+						'description' => __( 'draft to save for review, publish to take live or schedule.', 'hb' ),
+					),
+					'date'      => $date_property,
 				),
 				'required'   => array( 'title' ),
 			),
-			'output_schema'       => hb_ai_post_summary_schema(),
+			'output_schema'       => hb_ai_post_summary_with_date_schema(),
 			'execute_callback'    => 'hb_ai_create_content',
 			'permission_callback' => static function ( array $input ) {
-				return hb_ai_can_create( isset( $input['post_type'] ) ? (string) $input['post_type'] : 'post' );
+				$post_type = isset( $input['post_type'] ) ? (string) $input['post_type'] : 'post';
+
+				if ( ! hb_ai_can_create( $post_type ) ) {
+					return false;
+				}
+
+				return ! isset( $input['status'] ) || 'publish' !== $input['status'] || hb_ai_can_publish( $post_type );
 			},
 			'meta'                => hb_ai_ability_meta(),
 		)
@@ -797,6 +982,37 @@ function hb_register_ai_abilities() {
 				$post_id = isset( $input['post_id'] ) ? absint( $input['post_id'] ) : 0;
 
 				return current_user_can( 'edit_post', $post_id );
+			},
+			'meta'                => hb_ai_ability_meta(),
+		)
+	);
+
+	wp_register_ability(
+		'hb/publish-content',
+		array(
+			'label'               => __( 'Publish or schedule content', 'hb' ),
+			'description'         => __( 'Publish a draft, pending or scheduled post, page or custom post type entry now, or schedule it for a future date. Also reschedules a scheduled post. Publishing changes the live site; already-published content is refused.', 'hb' ),
+			'category'            => 'hb-content',
+			'input_schema'        => array(
+				'type'       => 'object',
+				'properties' => array(
+					'post_id' => array(
+						'type'        => 'integer',
+						'description' => __( 'ID of the content to publish or schedule.', 'hb' ),
+					),
+					'date'    => $date_property,
+				),
+				'required'   => array( 'post_id' ),
+			),
+			'output_schema'       => hb_ai_post_summary_with_date_schema(),
+			'execute_callback'    => 'hb_ai_publish_content',
+			'permission_callback' => static function ( array $input ) {
+				$post_id = isset( $input['post_id'] ) ? absint( $input['post_id'] ) : 0;
+				$post    = get_post( $post_id );
+
+				return null !== $post
+					&& current_user_can( 'edit_post', $post_id )
+					&& hb_ai_can_publish( $post->post_type );
 			},
 			'meta'                => hb_ai_ability_meta(),
 		)
