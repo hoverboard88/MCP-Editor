@@ -26,7 +26,8 @@
  * This gates the transport only. The abilities keep their own capability
  * checks, so they still behave correctly wherever else they are invoked from.
  *
- * @param string $capability Capability the adapter will check.
+ * The filter's incoming value is ignored, so the callback takes no arguments.
+ *
  * @return string Capability to require instead.
  */
 function hb_ai_mcp_transport_capability() {
