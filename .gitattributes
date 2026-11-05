@@ -6,3 +6,4 @@
 /composer.lock  export-ignore
 /phpcs.xml.dist export-ignore
 /CLAUDE.md      export-ignore
+/bin           export-ignore
