@@ -11,6 +11,36 @@ then moves everything under the new version.
 
 ## [Unreleased]
 
+### Added
+
+- Taxonomy abilities: `hb/list-taxonomies`, `hb/list-terms`,
+  `hb/set-post-terms` (replace, add or remove a post's terms by ID or name,
+  creating new terms as the tag box does), and `hb/create-term`,
+  `hb/update-term` and `hb/delete-term`.
+- `hb/get-content` now returns the post's terms in every taxonomy, and its
+  post screen settings with the available templates and formats.
+- `hb/update-content` sets slug, author, parent, menu order, template,
+  comment and ping status, password, sticky and post format.
+- `hb/set-status` ability: unpublish to draft or pending, make private,
+  trash, or restore from the trash.
+- `hb/list-authors` ability: users who can author a post type.
+- `hb/list-content` lists trashed content when asked for status `trash`.
+- `hb/update-seo` covers Yoast's search visibility (noindex), link following,
+  canonical URL, breadcrumb title and social (Facebook and X) previews.
+
+### Changed
+
+- `hb/update-fields` writes every ACF field type, including repeater,
+  flexible content, group, clone, image, gallery, relationship, post object,
+  taxonomy, user, link and map fields. Sub-fields are addressed by name, and
+  ACF's own validation runs before anything is saved.
+- `hb/get-fields` returns each field's structure (sub-fields, layouts,
+  choices, required) and expected value format, with values in the same shape
+  `hb/update-fields` accepts.
+- The AI Drafter role now has `manage_categories` and the remaining
+  `delete_*` capabilities for posts and pages (others', published, private),
+  so it can trash content.
+
 ## [1.1.0] - 2026-11-05
 
 ### Added

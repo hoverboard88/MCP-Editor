@@ -15,7 +15,7 @@
  * no-op once a role exists, so without a version gate an edited capability
  * list would never reach sites where the role is already registered.
  */
-define( 'HB_AI_DRAFTER_ROLE_VERSION', '6' );
+define( 'HB_AI_DRAFTER_ROLE_VERSION', '8' );
 
 /**
  * Capability that gates access to the MCP endpoint.
@@ -29,18 +29,22 @@ define( 'HB_AI_MCP_CAPABILITY', 'hb_use_mcp' );
 /**
  * Capabilities granted to the AI drafter role.
  *
- * Scoped to content: the account can create, revise, publish and schedule
- * posts, pages and the custom post types, relying on WordPress revisions as
- * the rollback path.
+ * Scoped to content, with what an editor has over it: the account can create,
+ * revise, publish, schedule, unpublish and trash posts, pages and the custom
+ * post types, relying on WordPress revisions and the trash as the rollback
+ * path.
  *
- * Two things are still deliberately withheld:
+ * The delete_* capabilities are what let it trash content. The MCP abilities
+ * only ever trash (and refuse when the trash is disabled), but the same
+ * capabilities would allow permanent deletion through wp-admin or the REST
+ * API.
  *
- * - delete_published_*, so the account cannot delete what is live. The MCP
- *   abilities also offer no way to unpublish; taking content down stays a
- *   human decision.
- * - Everything outside content and images. No manage_categories,
- *   edit_theme_options or manage_options, so taxonomy structure, templates and
- *   settings stay out of reach.
+ * Everything outside content, images and terms is withheld: no
+ * edit_theme_options or manage_options, so templates, menus and settings stay
+ * out of reach.
+ *
+ * manage_categories is granted so the account can create, rename and delete
+ * categories, tags and custom taxonomy terms, as an editor can.
  *
  * upload_files is granted so the account can add images and set featured
  * images. The MCP abilities only accept image types (see media.php); the
@@ -51,23 +55,30 @@ define( 'HB_AI_MCP_CAPABILITY', 'hb_use_mcp' );
  */
 function hb_ai_drafter_capabilities() {
 	return array(
-		'read'                 => true,
-		'edit_posts'           => true,
-		'edit_others_posts'    => true,
-		'edit_published_posts' => true,
-		'edit_private_posts'   => true,
-		'read_private_posts'   => true,
-		'delete_posts'         => true,
-		'publish_posts'        => true,
-		'edit_pages'           => true,
-		'edit_others_pages'    => true,
-		'edit_published_pages' => true,
-		'edit_private_pages'   => true,
-		'read_private_pages'   => true,
-		'delete_pages'         => true,
-		'publish_pages'        => true,
-		'upload_files'         => true,
-		HB_AI_MCP_CAPABILITY   => true,
+		'read'                   => true,
+		'edit_posts'             => true,
+		'edit_others_posts'      => true,
+		'edit_published_posts'   => true,
+		'edit_private_posts'     => true,
+		'read_private_posts'     => true,
+		'delete_posts'           => true,
+		'delete_others_posts'    => true,
+		'delete_published_posts' => true,
+		'delete_private_posts'   => true,
+		'publish_posts'          => true,
+		'edit_pages'             => true,
+		'edit_others_pages'      => true,
+		'edit_published_pages'   => true,
+		'edit_private_pages'     => true,
+		'read_private_pages'     => true,
+		'delete_pages'           => true,
+		'delete_others_pages'    => true,
+		'delete_published_pages' => true,
+		'delete_private_pages'   => true,
+		'publish_pages'          => true,
+		'upload_files'           => true,
+		'manage_categories'      => true,
+		HB_AI_MCP_CAPABILITY     => true,
 	);
 }
 
