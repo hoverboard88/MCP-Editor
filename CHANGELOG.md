@@ -11,6 +11,8 @@ then moves everything under the new version.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
 ### Added
 
 - Taxonomy abilities: `hb/list-taxonomies`, `hb/list-terms`,
@@ -27,6 +29,7 @@ then moves everything under the new version.
 - `hb/list-content` lists trashed content when asked for status `trash`.
 - `hb/update-seo` covers Yoast's search visibility (noindex), link following,
   canonical URL, breadcrumb title and social (Facebook and X) previews.
+- Adding caps for user mirroring what they can do in the post edit screen (#4)
 
 ### Changed
 
