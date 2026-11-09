@@ -445,14 +445,35 @@ function hb_ai_update_content( array $input ) {
 		$changes['post_excerpt'] = wp_slash( (string) $input['excerpt'] );
 	}
 
-	if ( count( $changes ) < 2 ) {
-		return new WP_Error( 'hb_ai_nothing_to_do', __( 'No title, content or excerpt was supplied.', 'hb' ) );
+	// Validate every attribute before anything is written.
+	$attributes = hb_ai_prepare_attributes( $post, $input );
+
+	if ( is_wp_error( $attributes ) ) {
+		return $attributes;
 	}
 
-	$result = wp_update_post( $changes, true );
+	list( $attribute_changes, $after ) = $attributes;
 
-	if ( is_wp_error( $result ) ) {
-		return $result;
+	$changes = array_merge( $changes, $attribute_changes );
+
+	if ( count( $changes ) < 2 && empty( $after ) ) {
+		return new WP_Error( 'hb_ai_nothing_to_do', __( 'Nothing to change was supplied.', 'hb' ) );
+	}
+
+	if ( count( $changes ) > 1 ) {
+		$result = wp_update_post( $changes, true );
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+	}
+
+	foreach ( $after as $write ) {
+		$result = $write();
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
 	}
 
 	return hb_ai_post_summary( $post->ID );
@@ -475,7 +496,8 @@ function hb_ai_list_content( array $input ) {
 		? array( $post_type )
 		: hb_ai_allowed_post_types();
 
-	$statuses = in_array( $status, hb_ai_editable_statuses(), true )
+	// Trashed content is only listed when asked for, so it can be restored.
+	$statuses = in_array( $status, array_merge( hb_ai_editable_statuses(), array( 'trash' ) ), true )
 		? array( $status )
 		: hb_ai_editable_statuses();
 
@@ -513,40 +535,400 @@ function hb_ai_list_content( array $input ) {
 /**
  * ACF field types an MCP client may write.
  *
- * Scalar types only. The structured types — repeater, flexible_content, group,
- * link, google_map — take shaped arrays that are easy to corrupt from a flat
- * value, and the relational ones (post_object, relationship, taxonomy, user,
- * image, file, gallery) take IDs that a client cannot easily verify. Images
- * reach a post through hb/set-featured-image instead. password is never
- * writable.
+ * Every registered type that stores a value, so the client can edit whatever
+ * an editor could in the post screen: structured types (repeater, flexible
+ * content, group, clone) and relational ones (image, gallery, relationship,
+ * post object, taxonomy, user) included. Only the presentational types, which
+ * hold no value, are left out.
+ *
+ * Values are checked by ACF's own validation before anything is saved, as the
+ * post screen does, so required fields, min/max rows and the like still hold.
  *
  * @return array List of ACF field type slugs.
  */
 function hb_ai_writable_field_types() {
+	$types = function_exists( 'acf_get_field_types' ) ? array_keys( acf_get_field_types() ) : array();
+	$types = array_values( array_diff( $types, array( 'message', 'tab', 'accordion' ) ) );
+
 	/**
 	 * Filters the ACF field types an MCP client may write.
 	 *
 	 * @param array $types List of ACF field type slugs.
 	 */
-	return (array) apply_filters(
-		'hb_ai_writable_field_types',
-		array(
-			'text',
-			'textarea',
-			'wysiwyg',
-			'number',
-			'range',
-			'email',
-			'url',
-			'select',
-			'radio',
-			'button_group',
-			'true_false',
-			'date_picker',
-			'date_time_picker',
-			'time_picker',
-			'color_picker',
-		)
+	return (array) apply_filters( 'hb_ai_writable_field_types', $types );
+}
+
+/**
+ * Container field types whose value is made of sub-field values.
+ *
+ * @return array List of ACF field type slugs.
+ */
+function hb_ai_acf_container_types() {
+	return array( 'repeater', 'group', 'clone', 'flexible_content' );
+}
+
+/**
+ * Find a sub-field by name or key.
+ *
+ * @param array  $sub_fields ACF sub-field arrays.
+ * @param string $name       Sub-field name or key.
+ * @return array|null The sub-field, or null.
+ */
+function hb_ai_acf_find_sub_field( $sub_fields, $name ) {
+	foreach ( (array) $sub_fields as $sub_field ) {
+		if ( $name === $sub_field['name'] || $name === $sub_field['key'] ) {
+			return $sub_field;
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Find a flexible content layout by name.
+ *
+ * @param array  $field ACF flexible content field.
+ * @param string $name  Layout name.
+ * @return array|null The layout, or null.
+ */
+function hb_ai_acf_find_layout( $field, $name ) {
+	foreach ( (array) ( isset( $field['layouts'] ) ? $field['layouts'] : array() ) as $layout ) {
+		if ( $name === $layout['name'] ) {
+			return $layout;
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Convert one row or group of sub-field values from names to field keys.
+ *
+ * @param array  $sub_fields ACF sub-field arrays the row may use.
+ * @param mixed  $row        Row value supplied by the client.
+ * @param string $path       Location of the row, for error messages.
+ * @return array|WP_Error Row keyed by sub-field key, or an error.
+ */
+function hb_ai_acf_row_to_keys( $sub_fields, $row, $path ) {
+	if ( ! is_array( $row ) ) {
+		return new WP_Error(
+			'hb_ai_invalid_value',
+			/* translators: %s: field path. */
+			sprintf( __( '"%s" must be an object of sub-field values.', 'hb' ), $path )
+		);
+	}
+
+	$out = array();
+
+	foreach ( $row as $name => $value ) {
+		$sub_field = hb_ai_acf_find_sub_field( $sub_fields, (string) $name );
+
+		if ( null === $sub_field ) {
+			return new WP_Error(
+				'hb_ai_unknown_field',
+				sprintf(
+					/* translators: 1: field path, 2: comma-separated list of sub-field names. */
+					__( 'No sub-field "%1$s". Available: %2$s', 'hb' ),
+					$path . '.' . $name,
+					implode( ', ', wp_list_pluck( (array) $sub_fields, 'name' ) )
+				)
+			);
+		}
+
+		$converted = hb_ai_acf_to_keys( $sub_field, $value, $path . '.' . $sub_field['name'] );
+
+		if ( is_wp_error( $converted ) ) {
+			return $converted;
+		}
+
+		$out[ $sub_field['key'] ] = $converted;
+	}
+
+	return $out;
+}
+
+/**
+ * Convert a client-supplied value, addressed by sub-field names, to the
+ * field-key form ACF validates and saves.
+ *
+ * ACF's save routines accept names for sub-fields, but its validation only
+ * looks values up by key; converting first means both see the same thing,
+ * and unknown names are reported instead of silently dropped.
+ *
+ * @param array  $field ACF field.
+ * @param mixed  $value Value supplied by the client.
+ * @param string $path  Location of the value, for error messages.
+ * @return mixed|WP_Error Value in field-key form, or an error.
+ */
+function hb_ai_acf_to_keys( $field, $value, $path ) {
+	if ( ! in_array( $field['type'], hb_ai_acf_container_types(), true ) || null === $value || '' === $value ) {
+		return $value;
+	}
+
+	if ( 'group' === $field['type'] || 'clone' === $field['type'] ) {
+		return hb_ai_acf_row_to_keys( $field['sub_fields'], $value, $path );
+	}
+
+	if ( ! is_array( $value ) || ! wp_is_numeric_array( $value ) ) {
+		return new WP_Error(
+			'hb_ai_invalid_value',
+			/* translators: %s: field path. */
+			sprintf( __( '"%s" must be an array of rows.', 'hb' ), $path )
+		);
+	}
+
+	$rows = array();
+
+	foreach ( array_values( $value ) as $i => $row ) {
+		$row_path = $path . '[' . $i . ']';
+
+		if ( 'repeater' === $field['type'] ) {
+			$converted = hb_ai_acf_row_to_keys( $field['sub_fields'], $row, $row_path );
+		} else {
+			$layout_name = is_array( $row ) && isset( $row['acf_fc_layout'] ) ? (string) $row['acf_fc_layout'] : '';
+			$layout      = hb_ai_acf_find_layout( $field, $layout_name );
+
+			if ( null === $layout ) {
+				return new WP_Error(
+					'hb_ai_invalid_layout',
+					sprintf(
+						/* translators: 1: field path, 2: comma-separated list of layout names. */
+						__( '"%1$s" needs an acf_fc_layout of one of: %2$s', 'hb' ),
+						$row_path,
+						implode( ', ', wp_list_pluck( (array) $field['layouts'], 'name' ) )
+					)
+				);
+			}
+
+			unset( $row['acf_fc_layout'] );
+			$converted = hb_ai_acf_row_to_keys( $layout['sub_fields'], $row, $row_path );
+
+			if ( ! is_wp_error( $converted ) ) {
+				$converted = array_merge( array( 'acf_fc_layout' => $layout['name'] ), $converted );
+			}
+		}
+
+		if ( is_wp_error( $converted ) ) {
+			return $converted;
+		}
+
+		$rows[] = $converted;
+	}
+
+	return $rows;
+}
+
+/**
+ * Re-key one stored row or group from field keys to sub-field names.
+ *
+ * @param array $sub_fields ACF sub-field arrays.
+ * @param mixed $row        Stored row, keyed by sub-field key.
+ * @return array Row keyed by sub-field name.
+ */
+function hb_ai_acf_row_to_names( $sub_fields, $row ) {
+	$row = is_array( $row ) ? $row : array();
+	$out = array();
+
+	foreach ( (array) $sub_fields as $sub_field ) {
+		if ( array_key_exists( $sub_field['key'], $row ) ) {
+			$value = $row[ $sub_field['key'] ];
+		} elseif ( array_key_exists( $sub_field['name'], $row ) ) {
+			$value = $row[ $sub_field['name'] ];
+		} else {
+			$value = null;
+		}
+
+		$out[ $sub_field['name'] ] = hb_ai_acf_to_names( $sub_field, $value );
+	}
+
+	return $out;
+}
+
+/**
+ * Convert a stored (unformatted) value to the name-keyed form the client
+ * writes back, so get-fields output can be edited and returned as-is.
+ *
+ * Unformatted values keep IDs as IDs — an image is its attachment ID, a
+ * relationship a list of post IDs — which is also what update-fields expects.
+ *
+ * @param array $field ACF field.
+ * @param mixed $value Unformatted stored value.
+ * @return mixed Value keyed by sub-field names.
+ */
+function hb_ai_acf_to_names( $field, $value ) {
+	if ( ! in_array( $field['type'], hb_ai_acf_container_types(), true ) ) {
+		return $value;
+	}
+
+	if ( 'group' === $field['type'] || 'clone' === $field['type'] ) {
+		return hb_ai_acf_row_to_names( $field['sub_fields'], $value );
+	}
+
+	$rows = array();
+
+	foreach ( is_array( $value ) ? array_values( $value ) : array() as $row ) {
+		if ( 'repeater' === $field['type'] ) {
+			$rows[] = hb_ai_acf_row_to_names( $field['sub_fields'], $row );
+			continue;
+		}
+
+		$layout = hb_ai_acf_find_layout( $field, isset( $row['acf_fc_layout'] ) ? (string) $row['acf_fc_layout'] : '' );
+
+		if ( null !== $layout ) {
+			$rows[] = array_merge(
+				array( 'acf_fc_layout' => $layout['name'] ),
+				hb_ai_acf_row_to_names( $layout['sub_fields'], $row )
+			);
+		}
+	}
+
+	return $rows;
+}
+
+/**
+ * How a field's value should be written, for types where it is not obvious.
+ *
+ * @param array $field ACF field.
+ * @return string Hint, or an empty string.
+ */
+function hb_ai_acf_value_hint( $field ) {
+	$multiple = ! empty( $field['multiple'] );
+
+	switch ( $field['type'] ) {
+		case 'image':
+		case 'file':
+			return __( 'Attachment ID (integer). Use list-images or upload-image to find one.', 'hb' );
+		case 'gallery':
+			return __( 'Array of attachment IDs.', 'hb' );
+		case 'relationship':
+			return __( 'Array of post IDs.', 'hb' );
+		case 'post_object':
+		case 'page_link':
+			return $multiple ? __( 'Array of post IDs.', 'hb' ) : __( 'Post ID.', 'hb' );
+		case 'taxonomy':
+			return __( 'Term ID, or array of term IDs. Use list-terms to find them.', 'hb' );
+		case 'user':
+			return $multiple ? __( 'Array of user IDs.', 'hb' ) : __( 'User ID.', 'hb' );
+		case 'select':
+			return $multiple ? __( 'Array of choice values.', 'hb' ) : __( 'One choice value.', 'hb' );
+		case 'checkbox':
+			return __( 'Array of choice values.', 'hb' );
+		case 'true_false':
+			return __( 'true or false.', 'hb' );
+		case 'date_picker':
+			return __( 'Date as Ymd, e.g. 20261231.', 'hb' );
+		case 'date_time_picker':
+			return __( 'Date and time as Y-m-d H:i:s.', 'hb' );
+		case 'time_picker':
+			return __( 'Time as H:i:s.', 'hb' );
+		case 'link':
+			return __( 'Object with url, title and target ("" or "_blank").', 'hb' );
+		case 'google_map':
+			return __( 'Object with address, lat and lng.', 'hb' );
+		case 'repeater':
+			return __( 'Array of rows; each row an object of sub-field name to value. The whole list is replaced.', 'hb' );
+		case 'flexible_content':
+			return __( 'Array of rows; each row an object with acf_fc_layout set to a layout name, plus that layout\'s sub-field values. The whole list is replaced.', 'hb' );
+		case 'group':
+		case 'clone':
+			return __( 'Object of sub-field name to value.', 'hb' );
+	}
+
+	return '';
+}
+
+/**
+ * Describe a field's structure for a client: type, constraints, choices and,
+ * for container types, its sub-fields or layouts.
+ *
+ * @param array $field ACF field.
+ * @return array Field description.
+ */
+function hb_ai_acf_describe( $field ) {
+	$out = array(
+		'name'     => $field['name'],
+		'label'    => isset( $field['label'] ) ? $field['label'] : '',
+		'type'     => $field['type'],
+		'required' => ! empty( $field['required'] ),
+	);
+
+	if ( ! empty( $field['instructions'] ) ) {
+		$out['instructions'] = $field['instructions'];
+	}
+
+	$hint = hb_ai_acf_value_hint( $field );
+
+	if ( '' !== $hint ) {
+		$out['value_format'] = $hint;
+	}
+
+	if ( ! empty( $field['choices'] ) && is_array( $field['choices'] ) ) {
+		$out['choices'] = array_map( 'strval', array_keys( $field['choices'] ) );
+	}
+
+	foreach ( array( 'min', 'max', 'post_type', 'taxonomy' ) as $setting ) {
+		if ( isset( $field[ $setting ] ) && '' !== $field[ $setting ] && array() !== $field[ $setting ] ) {
+			$out[ $setting ] = $field[ $setting ];
+		}
+	}
+
+	if ( ! empty( $field['sub_fields'] ) ) {
+		$out['sub_fields'] = array_map( 'hb_ai_acf_describe', array_values( $field['sub_fields'] ) );
+	}
+
+	if ( 'flexible_content' === $field['type'] && ! empty( $field['layouts'] ) ) {
+		$out['layouts'] = array();
+
+		foreach ( $field['layouts'] as $layout ) {
+			$out['layouts'][] = array(
+				'name'       => $layout['name'],
+				'label'      => $layout['label'],
+				'sub_fields' => array_map( 'hb_ai_acf_describe', array_values( (array) $layout['sub_fields'] ) ),
+			);
+		}
+	}
+
+	return $out;
+}
+
+/**
+ * Run ACF's own validation over a set of field-key values.
+ *
+ * The same checks the post screen runs on save: required fields, min/max
+ * rows, number ranges, email and URL formats, and any acf/validate_value
+ * filters the site adds.
+ *
+ * @param array $values Map of field key to [ field, value ].
+ * @return true|WP_Error True when valid, or an error listing the problems.
+ */
+function hb_ai_acf_validate( $values ) {
+	if ( ! function_exists( 'acf_validate_value' ) ) {
+		return true;
+	}
+
+	acf_reset_validation_errors();
+
+	foreach ( $values as $key => $pair ) {
+		acf_validate_value( $pair[1], $pair[0], 'acf[' . $key . ']' );
+	}
+
+	$errors = acf_get_validation_errors();
+	acf_reset_validation_errors();
+
+	if ( empty( $errors ) ) {
+		return true;
+	}
+
+	$messages = array();
+
+	foreach ( $errors as $error ) {
+		$messages[] = $error['message'] . ' (' . $error['input'] . ')';
+	}
+
+	return new WP_Error(
+		'hb_ai_invalid_value',
+		/* translators: %s: list of validation messages. */
+		sprintf( __( 'ACF validation failed: %s', 'hb' ), implode( '; ', $messages ) )
 	);
 }
 
@@ -554,9 +936,8 @@ function hb_ai_writable_field_types() {
  * Resolve the ACF fields attached to a post.
  *
  * Scoped to the field groups whose location rules match this specific post, so
- * options page, user and term field groups are never reachable. Only
- * top-level fields are returned; sub-fields belong to structured types that
- * are not writable here anyway.
+ * options page, user and term field groups are never reachable. Top-level
+ * fields are returned with their sub-fields nested inside.
  *
  * @param int $post_id Post ID.
  * @return array Map of field name to ACF field array.
@@ -622,26 +1003,15 @@ function hb_ai_get_fields( array $input ) {
 	$writable = hb_ai_writable_field_types();
 	$out      = array();
 
-	foreach ( hb_ai_get_post_fields( $post->ID ) as $name => $field ) {
-		$is_writable = in_array( $field['type'], $writable, true );
+	foreach ( hb_ai_get_post_fields( $post->ID ) as $field ) {
+		$entry = hb_ai_acf_describe( $field );
 
-		$entry = array(
-			'name'     => $name,
-			'label'    => isset( $field['label'] ) ? $field['label'] : '',
-			'type'     => $field['type'],
-			'writable' => $is_writable,
-		);
+		$entry['writable'] = in_array( $field['type'], $writable, true );
 
-		// Values are returned only for the types that can be written back, so
-		// the payload stays small and structured data is not round-tripped
-		// through a client that cannot reconstruct it.
-		if ( $is_writable ) {
-			$value          = get_field( $name, $post->ID );
-			$entry['value'] = is_scalar( $value ) || null === $value ? $value : wp_json_encode( $value );
-		}
-
-		if ( ! empty( $field['choices'] ) && is_array( $field['choices'] ) ) {
-			$entry['choices'] = array_keys( $field['choices'] );
+		// Unformatted, then re-keyed by name: exactly the shape update-fields
+		// accepts, so a value can be edited and sent straight back.
+		if ( $entry['writable'] ) {
+			$entry['value'] = hb_ai_acf_to_names( $field, get_field( $field['key'], $post->ID, false ) );
 		}
 
 		$out[] = $entry;
@@ -681,9 +1051,10 @@ function hb_ai_update_fields( array $input ) {
 
 	$available = hb_ai_get_post_fields( $post->ID );
 	$writable  = hb_ai_writable_field_types();
+	$prepared  = array();
 
-	// Validate everything before writing anything, so a bad name in the batch
-	// cannot leave the post half-updated.
+	// Validate everything before writing anything, so a bad name or value in
+	// the batch cannot leave the post half-updated.
 	foreach ( $values as $name => $value ) {
 		if ( ! isset( $available[ $name ] ) ) {
 			return new WP_Error(
@@ -709,16 +1080,20 @@ function hb_ai_update_fields( array $input ) {
 			);
 		}
 
-		if ( ! is_scalar( $value ) && null !== $value ) {
-			return new WP_Error(
-				'hb_ai_invalid_value',
-				sprintf(
-					/* translators: %s: field name. */
-					__( 'The value for "%s" must be a simple string, number or boolean.', 'hb' ),
-					$name
-				)
-			);
+		$field     = $available[ $name ];
+		$converted = hb_ai_acf_to_keys( $field, $value, $name );
+
+		if ( is_wp_error( $converted ) ) {
+			return $converted;
 		}
+
+		$prepared[ $field['key'] ] = array( $field, $converted, $name );
+	}
+
+	$valid = hb_ai_acf_validate( $prepared );
+
+	if ( is_wp_error( $valid ) ) {
+		return $valid;
 	}
 
 	// Snapshot current state, ACF values included, before overwriting.
@@ -726,9 +1101,9 @@ function hb_ai_update_fields( array $input ) {
 
 	$written = array();
 
-	foreach ( $values as $name => $value ) {
-		update_field( $available[ $name ]['key'], $value, $post->ID );
-		$written[] = $name;
+	foreach ( $prepared as $key => $item ) {
+		update_field( $key, $item[1], $post->ID );
+		$written[] = $item[2];
 	}
 
 	return array(
@@ -742,9 +1117,9 @@ function hb_ai_update_fields( array $input ) {
  * Yoast SEO fields an MCP client may read and write.
  *
  * Maps the ability's input key to the Yoast meta key, without the
- * _yoast_wpseo_ prefix. Limited to the snippet fields; the advanced ones
- * (noindex, canonical, redirects) can take a page out of search results and
- * stay a human decision.
+ * _yoast_wpseo_ prefix: the snippet fields, the advanced tab (search
+ * visibility, link following, canonical URL, breadcrumb title) and the social
+ * previews. Redirects are a Yoast Premium feature and not included.
  *
  * @return array Map of input key to Yoast meta key.
  */
@@ -757,10 +1132,40 @@ function hb_ai_seo_fields() {
 	return (array) apply_filters(
 		'hb_ai_seo_fields',
 		array(
-			'seo_title'        => 'title',
-			'meta_description' => 'metadesc',
-			'focus_keyphrase'  => 'focuskw',
+			'seo_title'          => 'title',
+			'meta_description'   => 'metadesc',
+			'focus_keyphrase'    => 'focuskw',
+			'search_visibility'  => 'meta-robots-noindex',
+			'follow_links'       => 'meta-robots-nofollow',
+			'canonical_url'      => 'canonical',
+			'breadcrumb_title'   => 'bctitle',
+			'social_title'       => 'opengraph-title',
+			'social_description' => 'opengraph-description',
+			'x_title'            => 'twitter-title',
+			'x_description'      => 'twitter-description',
 		)
+	);
+}
+
+/**
+ * Readable values for the Yoast fields stored as codes.
+ *
+ * Maps input key to a map of readable value to the code Yoast stores. For
+ * search_visibility, "default" follows the post type's setting in Yoast.
+ *
+ * @return array Map of input key to value map.
+ */
+function hb_ai_seo_choices() {
+	return array(
+		'search_visibility' => array(
+			'default' => '0',
+			'noindex' => '1',
+			'index'   => '2',
+		),
+		'follow_links'      => array(
+			'follow'   => '0',
+			'nofollow' => '1',
+		),
 	);
 }
 
@@ -771,10 +1176,18 @@ function hb_ai_seo_fields() {
  * @return array Map of input key to stored value.
  */
 function hb_ai_get_seo_values( $post_id ) {
-	$values = array();
+	$values  = array();
+	$choices = hb_ai_seo_choices();
 
 	foreach ( hb_ai_seo_fields() as $input_key => $meta_key ) {
-		$values[ $input_key ] = (string) WPSEO_Meta::get_value( $meta_key, $post_id );
+		$value = (string) WPSEO_Meta::get_value( $meta_key, $post_id );
+
+		if ( isset( $choices[ $input_key ] ) ) {
+			$readable = array_search( $value, $choices[ $input_key ], true );
+			$value    = false === $readable ? $value : $readable;
+		}
+
+		$values[ $input_key ] = $value;
 	}
 
 	return $values;
@@ -809,6 +1222,9 @@ function hb_ai_get_content( array $input ) {
 	if ( post_type_supports( $post->post_type, 'thumbnail' ) ) {
 		$out['featured_image'] = hb_ai_image_summary( get_post_thumbnail_id( $post->ID ) );
 	}
+
+	$out['terms']      = hb_ai_post_terms( $post );
+	$out['attributes'] = hb_ai_get_attributes( $post );
 
 	if ( class_exists( 'WPSEO_Meta' ) ) {
 		$out['seo'] = hb_ai_get_seo_values( $post->ID );
@@ -848,6 +1264,26 @@ function hb_ai_update_seo( array $input ) {
 				implode( ', ', array_keys( $fields ) )
 			)
 		);
+	}
+
+	$choices = hb_ai_seo_choices();
+
+	foreach ( $changes as $input_key => $value ) {
+		if ( isset( $choices[ $input_key ] ) ) {
+			if ( ! isset( $choices[ $input_key ][ (string) $value ] ) ) {
+				return new WP_Error(
+					'hb_ai_invalid_value',
+					sprintf(
+						/* translators: 1: field name, 2: comma-separated list of values. */
+						__( '%1$s must be one of: %2$s', 'hb' ),
+						$input_key,
+						implode( ', ', array_keys( $choices[ $input_key ] ) )
+					)
+				);
+			}
+
+			$changes[ $input_key ] = $choices[ $input_key ][ (string) $value ];
+		}
 	}
 
 	$previous = hb_ai_get_seo_values( $post->ID );
@@ -952,7 +1388,7 @@ function hb_register_ai_abilities() {
 		'hb/update-content',
 		array(
 			'label'               => __( 'Update content', 'hb' ),
-			'description'         => __( 'Revise an existing post, page or custom post type entry. Editing published content changes the live site immediately; WordPress keeps a revision of the previous version.', 'hb' ),
+			'description'         => __( 'Revise an existing post, page or custom post type entry: title, body, excerpt, and the post screen settings (slug, author, parent, order, template, discussion, password, sticky, format). Only supplied fields change. Editing published content changes the live site immediately; WordPress keeps a revision of the previous content. get-content shows the current settings and the available templates and formats.', 'hb' ),
 			'category'            => 'hb-content',
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -973,7 +1409,7 @@ function hb_register_ai_abilities() {
 						'type'        => 'string',
 						'description' => __( 'Replacement excerpt. Omit to leave unchanged.', 'hb' ),
 					),
-				),
+				) + hb_ai_attribute_properties(),
 				'required'   => array( 'post_id' ),
 			),
 			'output_schema'       => hb_ai_post_summary_schema(),
@@ -1034,8 +1470,8 @@ function hb_register_ai_abilities() {
 					),
 					'status'    => array(
 						'type'        => 'string',
-						'enum'        => hb_ai_editable_statuses(),
-						'description' => __( 'Limit results to one status. Omit for all editable statuses.', 'hb' ),
+						'enum'        => array_merge( hb_ai_editable_statuses(), array( 'trash' ) ),
+						'description' => __( 'Limit results to one status. Omit for all editable statuses; trashed content is only listed with status trash.', 'hb' ),
 					),
 					'search'    => array(
 						'type'        => 'string',
@@ -1071,15 +1507,25 @@ function hb_register_ai_abilities() {
 
 	$seo_properties = array();
 
+	$seo_choices = hb_ai_seo_choices();
+
 	foreach ( array_keys( hb_ai_seo_fields() ) as $input_key ) {
 		$seo_properties[ $input_key ] = array( 'type' => 'string' );
+
+		if ( isset( $seo_choices[ $input_key ] ) ) {
+			$seo_properties[ $input_key ]['enum'] = array_keys( $seo_choices[ $input_key ] );
+		}
+	}
+
+	if ( isset( $seo_properties['search_visibility'] ) ) {
+		$seo_properties['search_visibility']['description'] = __( 'Whether search engines may index the page. "default" follows the post type setting in Yoast; "noindex" removes the page from search results.', 'hb' );
 	}
 
 	wp_register_ability(
 		'hb/get-content',
 		array(
 			'label'               => __( 'Get content', 'hb' ),
-			'description'         => __( 'Read the title, body, excerpt, featured image and Yoast SEO fields of a post, page or custom post type entry, including drafts. Use list-content to find the ID.', 'hb' ),
+			'description'         => __( 'Read the title, body, excerpt, featured image, taxonomy terms, post settings (slug, author, template and so on) and Yoast SEO fields of a post, page or custom post type entry, including drafts. Use list-content to find the ID.', 'hb' ),
 			'category'            => 'hb-content',
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1100,6 +1546,18 @@ function hb_register_ai_abilities() {
 						'excerpt'        => array( 'type' => 'string' ),
 						'modified'       => array( 'type' => 'string' ),
 						'featured_image' => hb_ai_image_summary_schema(),
+						'terms'          => array(
+							'type'                 => 'object',
+							'description'          => __( 'Assigned terms, keyed by taxonomy slug.', 'hb' ),
+							'additionalProperties' => array(
+								'type'  => 'array',
+								'items' => hb_ai_term_summary_schema(),
+							),
+						),
+						'attributes'     => array(
+							'type'        => 'object',
+							'description' => __( 'Post screen settings, as update-content accepts them, plus available_templates and formats where they apply.', 'hb' ),
+						),
 						'seo'            => array(
 							'type'       => 'object',
 							'properties' => $seo_properties,
@@ -1131,7 +1589,7 @@ function hb_register_ai_abilities() {
 			'hb/update-seo',
 			array(
 				'label'               => __( 'Update SEO fields', 'hb' ),
-				'description'         => __( 'Set the Yoast SEO title, meta description or focus keyphrase of a post. Omitted fields are left unchanged; an empty string clears a field. Yoast keeps no revisions, so the previous values are returned.', 'hb' ),
+				'description'         => __( 'Set Yoast SEO fields on a post: title, meta description, focus keyphrase, search visibility (noindex), link following, canonical URL, breadcrumb title and social previews. Omitted fields are left unchanged; an empty string clears a field. Yoast keeps no revisions, so the previous values are returned.', 'hb' ),
 				'category'            => 'hb-content',
 				'input_schema'        => array(
 					'type'       => 'object',
@@ -1180,7 +1638,7 @@ function hb_register_ai_abilities() {
 		'hb/get-fields',
 		array(
 			'label'               => __( 'Get custom fields', 'hb' ),
-			'description'         => __( 'List the ACF custom fields attached to a post, with their current values. Call this before updating fields to learn which names and types exist.', 'hb' ),
+			'description'         => __( 'List the ACF custom fields attached to a post with their current values, structure (sub-fields, flexible content layouts, choices) and the value format each expects. Call this before updating fields; values come back in the same shape update-fields accepts.', 'hb' ),
 			'category'            => 'hb-content',
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1201,14 +1659,25 @@ function hb_register_ai_abilities() {
 						'items' => array(
 							'type'       => 'object',
 							'properties' => array(
-								'name'     => array( 'type' => 'string' ),
-								'label'    => array( 'type' => 'string' ),
-								'type'     => array( 'type' => 'string' ),
-								'writable' => array( 'type' => 'boolean' ),
-								'value'    => array( 'type' => array( 'string', 'number', 'boolean', 'null' ) ),
-								'choices'  => array(
+								'name'         => array( 'type' => 'string' ),
+								'label'        => array( 'type' => 'string' ),
+								'type'         => array( 'type' => 'string' ),
+								'required'     => array( 'type' => 'boolean' ),
+								'writable'     => array( 'type' => 'boolean' ),
+								'instructions' => array( 'type' => 'string' ),
+								'value_format' => array( 'type' => 'string' ),
+								'value'        => array( 'description' => __( 'Current value, in the shape update-fields accepts.', 'hb' ) ),
+								'choices'      => array(
 									'type'  => 'array',
 									'items' => array( 'type' => 'string' ),
+								),
+								'sub_fields'   => array(
+									'type'        => 'array',
+									'description' => __( 'Sub-fields of a repeater, group or clone, described the same way.', 'hb' ),
+								),
+								'layouts'      => array(
+									'type'        => 'array',
+									'description' => __( 'Flexible content layouts: name, label and sub_fields.', 'hb' ),
 								),
 							),
 						),
@@ -1238,7 +1707,7 @@ function hb_register_ai_abilities() {
 		'hb/update-fields',
 		array(
 			'label'               => __( 'Update custom fields', 'hb' ),
-			'description'         => __( 'Set ACF custom field values on a post. Only simple field types can be written; call get-fields first to see which. A revision is saved before writing, so previous values stay recoverable.', 'hb' ),
+			'description'         => __( 'Set ACF custom field values on a post, any field type: repeaters and flexible content take the full list of rows (it replaces the existing rows), groups an object, images and relationships IDs. Address sub-fields by name. Call get-fields first for names, structure and formats. ACF validation runs first and nothing is saved if any value fails; a revision is saved before writing, so previous values stay recoverable.', 'hb' ),
 			'category'            => 'hb-content',
 			'input_schema'        => array(
 				'type'       => 'object',
@@ -1249,7 +1718,7 @@ function hb_register_ai_abilities() {
 					),
 					'fields'  => array(
 						'type'        => 'object',
-						'description' => __( 'Map of ACF field name to its new value.', 'hb' ),
+						'description' => __( 'Map of ACF field name to its new value. Omitted fields are left unchanged.', 'hb' ),
 					),
 				),
 				'required'   => array( 'post_id', 'fields' ),
